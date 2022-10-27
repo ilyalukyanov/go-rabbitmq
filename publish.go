@@ -37,6 +37,17 @@ type Confirmation struct {
 	ReconnectionCount int
 }
 
+// DeferredConfirmation represents a future publisher confirm for a message. It
+// allows users to directly correlate a publishing to a confirmation. These are
+// returned from PublishWithDeferredConfirm.
+type DeferredConfirmation struct {
+	confirmations []*amqp.DeferredConfirmation
+}
+
+// DeferredConfirmationAcks contains ACK results from deferred confirmations for
+// each routing key in the order they are passed to PublishWithDeferredConfirm.
+type DeferredConfirmationAcks []bool
+
 // Publisher allows you to publish messages safely across an open connection
 type Publisher struct {
 	chManager *channelManager
@@ -155,16 +166,26 @@ func (publisher *Publisher) Publish(
 	routingKeys []string,
 	optionFuncs ...func(*PublishOptions),
 ) error {
+	_, err := publisher.PublishWithDeferredConfirm(data, routingKeys, optionFuncs...)
+	return err
+}
+
+// PublishWithDeferredConfirm publishes the provided data to the given routing keys over the connection
+func (publisher *Publisher) PublishWithDeferredConfirm(
+	data []byte,
+	routingKeys []string,
+	optionFuncs ...func(*PublishOptions),
+) (*DeferredConfirmation, error) {
 	publisher.disablePublishDueToFlowMux.RLock()
 	defer publisher.disablePublishDueToFlowMux.RUnlock()
 	if publisher.disablePublishDueToFlow {
-		return fmt.Errorf("publishing blocked due to high flow on the server")
+		return nil, fmt.Errorf("publishing blocked due to high flow on the server")
 	}
 
 	publisher.disablePublishDueToBlockedMux.RLock()
 	defer publisher.disablePublishDueToBlockedMux.RUnlock()
 	if publisher.disablePublishDueToBlocked {
-		return fmt.Errorf("publishing blocked due to TCP block on the server")
+		return nil, fmt.Errorf("publishing blocked due to TCP block on the server")
 	}
 
 	options := &PublishOptions{}
@@ -174,6 +195,8 @@ func (publisher *Publisher) Publish(
 	if options.DeliveryMode == 0 {
 		options.DeliveryMode = Transient
 	}
+
+	var deferredConfirmations []*amqp.DeferredConfirmation
 
 	for _, routingKey := range routingKeys {
 		var message = amqp.Publishing{}
@@ -193,7 +216,7 @@ func (publisher *Publisher) Publish(
 		message.AppId = options.AppID
 
 		// Actual publish.
-		err := publisher.chManager.channel.Publish(
+		dc, err := publisher.chManager.channel.PublishWithDeferredConfirm(
 			options.Exchange,
 			routingKey,
 			options.Mandatory,
@@ -201,15 +224,17 @@ func (publisher *Publisher) Publish(
 			message,
 		)
 		if err != nil {
-			return err
+			return nil, err
 		}
+
+		deferredConfirmations = append(deferredConfirmations, dc)
 	}
-	return nil
+	return &DeferredConfirmation{confirmations: deferredConfirmations}, nil
 }
 
 // Close closes the publisher and releases resources
 // The publisher should be discarded as it's not safe for re-use
-func (publisher Publisher) Close() error {
+func (publisher *Publisher) Close() error {
 	publisher.chManager.logger.Infof("closing publisher...")
 	return publisher.chManager.close()
 }
@@ -232,4 +257,25 @@ func (publisher *Publisher) startNotifyPublishHandler() {
 			}
 		}
 	}()
+}
+
+// Wait  wait for publisher confirmations for each routing key.
+// A value of an item is true if server successfully received publishing for
+// the corresponding routing key.
+func (dc *DeferredConfirmation) Wait() DeferredConfirmationAcks {
+	var acks DeferredConfirmationAcks
+	for _, dc := range dc.confirmations {
+		acks = append(acks, dc.Wait())
+	}
+	return acks
+}
+
+// AllAcked returns true if all confirmations were ACKed and false if any single one wasn't
+func (dca DeferredConfirmationAcks) AllAcked() bool {
+	for _, ack := range dca {
+		if !ack {
+			return false
+		}
+	}
+	return true
 }
