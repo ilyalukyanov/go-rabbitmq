@@ -149,6 +149,9 @@ func (publisher *Publisher) handleRestarts() {
 		if publisher.notifyReturnChan != nil {
 			go publisher.startNotifyReturnHandler()
 		}
+
+		publisher.restoreChannelConfirmMode()
+
 		if publisher.notifyPublishChan != nil {
 			publisher.startNotifyPublishHandler()
 		}
@@ -166,6 +169,7 @@ func (publisher *Publisher) NotifyReturn() <-chan Return {
 // NotifyPublish registers a listener for publish confirmations, must set ConfirmPublishings option
 func (publisher *Publisher) NotifyPublish() <-chan Confirmation {
 	publisher.notifyPublishChan = make(chan Confirmation)
+	publisher.putChannelIntoConfirmMode()
 	publisher.startNotifyPublishHandler()
 	return publisher.notifyPublishChan
 }
@@ -273,7 +277,6 @@ func (publisher *Publisher) startNotifyReturnHandler() {
 }
 
 func (publisher *Publisher) startNotifyPublishHandler() {
-	publisher.putChannelIntoConfirmMode()
 	go func() {
 		publishAMQPCh := publisher.chManager.channel.NotifyPublish(make(chan amqp.Confirmation, 1))
 		for conf := range publishAMQPCh {
@@ -283,6 +286,17 @@ func (publisher *Publisher) startNotifyPublishHandler() {
 			}
 		}
 	}()
+}
+
+func (publisher *Publisher) restoreChannelConfirmMode() {
+	publisher.enableConfirmModeMux.Lock()
+	defer publisher.enableConfirmModeMux.Unlock()
+
+	if !publisher.confirmModeEnabled {
+		return
+	}
+
+	publisher.chManager.channel.Confirm(false)
 }
 
 func (publisher *Publisher) putChannelIntoConfirmMode() error {
