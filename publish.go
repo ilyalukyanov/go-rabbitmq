@@ -1,6 +1,7 @@
 package rabbitmq
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -42,11 +43,15 @@ type Confirmation struct {
 // returned from PublishWithDeferredConfirm.
 type DeferredConfirmation struct {
 	confirmations []*amqp.DeferredConfirmation
+	routingKeys   []string
 }
 
-// DeferredConfirmationAcks contains ACK results from deferred confirmations for
-// each routing key in the order they are passed to PublishWithDeferredConfirm.
-type DeferredConfirmationAcks []bool
+// DeferredConfirmationResult contains ACK results in its Acks map
+// where keys are routing keys and values are their corresponding ack results
+type DeferredConfirmationResult struct {
+	Acks        map[string]bool
+	routingKeys []string
+}
 
 // Publisher allows you to publish messages safely across an open connection
 type Publisher struct {
@@ -229,7 +234,10 @@ func (publisher *Publisher) PublishWithDeferredConfirm(
 
 		deferredConfirmations = append(deferredConfirmations, dc)
 	}
-	return &DeferredConfirmation{confirmations: deferredConfirmations}, nil
+	return &DeferredConfirmation{
+		confirmations: deferredConfirmations,
+		routingKeys:   routingKeys,
+	}, nil
 }
 
 // Close closes the publisher and releases resources
@@ -260,22 +268,55 @@ func (publisher *Publisher) startNotifyPublishHandler() {
 }
 
 // Wait  wait for publisher confirmations for each routing key.
-// A value of an item is true if server successfully received publishing for
-// the corresponding routing key.
-func (dc *DeferredConfirmation) Wait() DeferredConfirmationAcks {
-	var acks DeferredConfirmationAcks
-	for _, dc := range dc.confirmations {
-		acks = append(acks, dc.Wait())
+func (dc *DeferredConfirmation) Wait(ctx context.Context) DeferredConfirmationResult {
+	acks := map[string]bool{}
+	done := make(chan struct{})
+
+	wg := sync.WaitGroup{}
+	wg.Add(len(dc.confirmations))
+
+	for index, cnf := range dc.confirmations {
+		routingKey := dc.routingKeys[index]
+
+		go func(cnf *amqp.DeferredConfirmation) {
+			defer wg.Done()
+			acks[routingKey] = cnf.Wait()
+		}(cnf)
 	}
-	return acks
+
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-ctx.Done():
+	case <-done:
+	}
+
+	return DeferredConfirmationResult{
+		Acks:        acks,
+		routingKeys: dc.routingKeys,
+	}
 }
 
 // AllAcked returns true if all confirmations were ACKed and false if any single one wasn't
-func (dca DeferredConfirmationAcks) AllAcked() bool {
-	for _, ack := range dca {
-		if !ack {
+func (dcr DeferredConfirmationResult) AllAcked() bool {
+	for _, rk := range dcr.routingKeys {
+		if ack, ok := dcr.Acks[rk]; !ok || !ack {
 			return false
 		}
 	}
 	return true
+}
+
+// NotAcked returns a slice of routing keys for which messages weren't ACKed
+func (dcr DeferredConfirmationResult) NotAcked() []string {
+	var notAcked []string
+	for _, rk := range dcr.routingKeys {
+		if ack, ok := dcr.Acks[rk]; !ok || !ack {
+			notAcked = append(notAcked, rk)
+		}
+	}
+	return notAcked
 }
