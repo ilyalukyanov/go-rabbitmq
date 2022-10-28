@@ -66,6 +66,9 @@ type Publisher struct {
 	disablePublishDueToBlocked    bool
 	disablePublishDueToBlockedMux *sync.RWMutex
 
+	enableConfirmModeMux *sync.Mutex
+	confirmModeEnabled   bool
+
 	options PublisherOptions
 }
 
@@ -126,6 +129,8 @@ func NewPublisher(url string, config Config, optionFuncs ...func(*PublisherOptio
 		options:                       *options,
 		notifyReturnChan:              nil,
 		notifyPublishChan:             nil,
+		enableConfirmModeMux:          &sync.Mutex{},
+		confirmModeEnabled:            false,
 	}
 
 	go publisher.startNotifyFlowHandler()
@@ -171,12 +176,25 @@ func (publisher *Publisher) Publish(
 	routingKeys []string,
 	optionFuncs ...func(*PublishOptions),
 ) error {
-	_, err := publisher.PublishWithDeferredConfirm(data, routingKeys, optionFuncs...)
+	_, err := publisher.publishWithDeferredConfirm(data, routingKeys, optionFuncs...)
 	return err
 }
 
 // PublishWithDeferredConfirm publishes the provided data to the given routing keys over the connection
 func (publisher *Publisher) PublishWithDeferredConfirm(
+	data []byte,
+	routingKeys []string,
+	optionFuncs ...func(*PublishOptions),
+) (*DeferredConfirmation, error) {
+	err := publisher.putChannelIntoConfirmMode()
+	if err != nil {
+		return nil, err
+	}
+
+	return publisher.publishWithDeferredConfirm(data, routingKeys, optionFuncs...)
+}
+
+func (publisher *Publisher) publishWithDeferredConfirm(
 	data []byte,
 	routingKeys []string,
 	optionFuncs ...func(*PublishOptions),
@@ -255,7 +273,7 @@ func (publisher *Publisher) startNotifyReturnHandler() {
 }
 
 func (publisher *Publisher) startNotifyPublishHandler() {
-	publisher.chManager.channel.Confirm(false)
+	publisher.putChannelIntoConfirmMode()
 	go func() {
 		publishAMQPCh := publisher.chManager.channel.NotifyPublish(make(chan amqp.Confirmation, 1))
 		for conf := range publishAMQPCh {
@@ -265,6 +283,26 @@ func (publisher *Publisher) startNotifyPublishHandler() {
 			}
 		}
 	}()
+}
+
+func (publisher *Publisher) putChannelIntoConfirmMode() error {
+	if publisher.confirmModeEnabled {
+		return nil
+	}
+
+	publisher.enableConfirmModeMux.Lock()
+	defer publisher.enableConfirmModeMux.Unlock()
+
+	if publisher.confirmModeEnabled {
+		return nil
+	}
+
+	err := publisher.chManager.channel.Confirm(false)
+	if err == nil {
+		publisher.confirmModeEnabled = true
+	}
+
+	return err
 }
 
 // Wait  wait for publisher confirmations for each routing key.
