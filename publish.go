@@ -180,12 +180,23 @@ func (publisher *Publisher) Publish(
 	routingKeys []string,
 	optionFuncs ...func(*PublishOptions),
 ) error {
-	_, err := publisher.publishWithDeferredConfirm(data, routingKeys, optionFuncs...)
+	return publisher.PublishWithContext(context.Background(), data, routingKeys, optionFuncs...)
+}
+
+// PublishWithContext publishes the provided data to the given routing keys over the connection
+func (publisher *Publisher) PublishWithContext(
+	ctx context.Context,
+	data []byte,
+	routingKeys []string,
+	optionFuncs ...func(*PublishOptions),
+) error {
+	_, err := publisher.publishWithDeferredConfirmWithContext(ctx, data, routingKeys, optionFuncs...)
 	return err
 }
 
-// PublishWithDeferredConfirm publishes the provided data to the given routing keys over the connection
-func (publisher *Publisher) PublishWithDeferredConfirm(
+// PublishWithDeferredConfirmWithContext publishes the provided data to the given routing keys over the connection
+func (publisher *Publisher) PublishWithDeferredConfirmWithContext(
+	ctx context.Context,
 	data []byte,
 	routingKeys []string,
 	optionFuncs ...func(*PublishOptions),
@@ -195,10 +206,11 @@ func (publisher *Publisher) PublishWithDeferredConfirm(
 		return nil, err
 	}
 
-	return publisher.publishWithDeferredConfirm(data, routingKeys, optionFuncs...)
+	return publisher.publishWithDeferredConfirmWithContext(ctx, data, routingKeys, optionFuncs...)
 }
 
-func (publisher *Publisher) publishWithDeferredConfirm(
+func (publisher *Publisher) publishWithDeferredConfirmWithContext(
+	ctx context.Context,
 	data []byte,
 	routingKeys []string,
 	optionFuncs ...func(*PublishOptions),
@@ -243,7 +255,8 @@ func (publisher *Publisher) publishWithDeferredConfirm(
 		message.AppId = options.AppID
 
 		// Actual publish.
-		dc, err := publisher.chManager.channel.PublishWithDeferredConfirm(
+		dc, err := publisher.chManager.channel.PublishWithDeferredConfirmWithContext(
+			ctx,
 			options.Exchange,
 			routingKey,
 			options.Mandatory,
